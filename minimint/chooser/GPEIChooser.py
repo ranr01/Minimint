@@ -49,6 +49,7 @@ class GPEIChooser:
         #self.state_pkl       = os.path.join(expt_dir, self.__module__ + ".pkl")
 
         self.mcmc_iters      = int(mcmc_iters)
+        self.burn_in_mcmc_iters = 100
         self.pending_samples = pending_samples
         self.D               = -1
         self.hyper_iters     = 1
@@ -131,6 +132,11 @@ class GPEIChooser:
         cand = grid[candidates,:]
         pend = grid[pending,:]
         vals = values[complete]
+
+
+        if self.burn_in_mcmc_iters > 0:
+            for t in range(self.burn_in_mcmc_iters):
+                self.sample_hypers(comp, vals)
 
         if self.mcmc_iters > 0:
             # Sample from hyperparameters.

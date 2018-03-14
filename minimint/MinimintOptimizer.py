@@ -70,3 +70,45 @@ class MinimintOptimizer(object):
 
         #return parameters of selected job
         return self.pending_job_id[-1],self.gmap.unit_to_list(self.pending[-1])
+
+    def find_next_point_from_random_points(self):
+        n_candidates = len(self.candidates)
+        D = len(self.candidates[0])
+        random_points = list(np.random.rand(n_candidates,D))
+        grid = np.array(self.complete + random_points + self.pending)
+        grid_idx = np.hstack((np.zeros(len(self.complete)),
+                              np.ones(n_candidates),
+                              1.+np.ones(len(self.pending))))
+        #choose point
+        job_id = self.chooser.next(grid,  np.array(self.values), np.array(self.durations),
+                              np.nonzero(grid_idx == 1)[0],
+                              np.nonzero(grid_idx == 2)[0],
+                              np.nonzero(grid_idx == 0)[0])
+
+        # If the job_id is a tuple, then the chooser picked a new job not from
+        # the candidate list
+        if isinstance(job_id, tuple):
+            (job_id, candidate) = job_id
+        else:
+            candidate = grid[job_id,:]
+
+        #add job to pending
+        self.pending.append(candidate)
+        self.pending_job_id.append(self.next_job_id)
+        self.next_job_id += 1
+
+        #return parameters of selected job
+        return self.pending_job_id[-1],self.gmap.unit_to_list(self.pending[-1])
+
+    def get_next_grid_point(self):
+        #add point to grid
+        self.candidates += list(self.gmap.hypercube_grid(1,self.next_job_id + self.grid_size))
+        #add job to pending
+        self.pending.append(self.candidates[0])
+        self.pending_job_id.append(self.next_job_id)
+        self.next_job_id += 1
+        #remove point from grid
+        del self.candidates[0]
+
+        #return parameters of selected job
+        return self.pending_job_id[-1],self.gmap.unit_to_list(self.pending[-1])
