@@ -8,3 +8,9 @@ I provide the class MinimintOptimizer that does the book keeping of the sampled 
 
 It does not handle any managing of tasks or results and therefor can be combined with any job management framework.
 Minimint_test.ipynb is a Jupyter notebook that presents a simple example of using Minimint together with [Ipyparallel](https://github.com/ipython/ipyparallel).
+
+## Parallel Bayesian Optimization (BO)
+
+I introduce a scalable way to perform parallel, distributed BO for hyperparameters
+optimization. See the minimint_test_parallel_BO_max_EI_with_pending.ipynb Jupyter
+notebook for details. 

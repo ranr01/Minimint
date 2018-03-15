@@ -1,6 +1,7 @@
 import ipyparallel as ipp
 import numpy as np
 import time
+import pickle
 
 class IPP_MinimintOptimizer(object):
     def __init__(self,workmanager,\
@@ -67,48 +68,55 @@ class IPP_MinimintOptimizer(object):
         self.shutdown_ipp = True
         self.pre_init = pre_init
         self.t_sleep = 1. #time between initial submissions
-
-
-
-    def _unwrap_async_result(self, ar):
-        # we know these are done, so don't worry about blocking
-        result = ar.get()
-        #sometimes returns list with one tuple
-        if type(result)==list:
-            result = result[0]
-        return result
+        self.max_n_jobs = 1000 # max. number of jobs to submit
 
     def submit_init(self):
+        '''
+        Initial start up of the cluster jobs.
+        Can also be used to resume simulation on cluster,
+        with the proper initialization of the AsyncManager (self.HO).
 
-        def sleep_after(f,t):
-            time.sleep(t)
-            return f
+        Fills the lbview with jobs from the pending list of HO.
+        If there are more pending jobs than CPUs in lbview removes the remaining
+        jobs from the pending list.
+        Fills remaining slots in lbview with BO jobs
 
-        if self.pre_init != None:
-            self.pre_init()
+        Assumes the lbview is empty.
+        '''
+        # init bookkeeping
+        self.pending_work_dict = {}
+        self.pending = set()
+        self.res_list =[]
+        self.n_jobs = len(self.HO.complete) + len(self.HO.pending)
 
-        # submit jobs of initial grid
-        async_sim_list = [sleep_after(self.lbview.apply_async(self.run_job,p),\
-                                      self.t_sleep) \
-                             for p in self.HO.init_grid_params ]
-        print("submitted {} initial jobs".format(len(async_sim_list)))
+        # if we have more pending jobs than cpus to run we simply remove the
+        # first unsubmitted jobs since they are the most uninformative
+        # (in a resume situation)
+        n_remove = len(self.HO.pending) - len(self.lbview)
+        if n_remove > 0:
+            del self.HO.pending[:n_remove]
+            del self.HO.pending_job_id[:n_remove]
 
+        # submit/resubmit pending simulations
+        for HCube_params,job_id in zip(self.HO.pending,self.HO.pending_job_id):
+            # submit job in self.HO.pending params are in hypercube units
+            params = self.HO.gmap.unit_to_list(HCube_params)
+            self._submit_sim_job(job_id,params)
+            time.sleep(self.t_sleep)
 
-        # dictionary with needed information about pending jobs
-        self.pending_work_dict = {ar.msg_ids[0]: {'async_res':ar,\
-                                             'type':self._SIMULATION,\
-                                             'job_id':job_id} \
-                             for ar,job_id \
-                             in zip(async_sim_list,self.HO.pending_job_id)}
+        n_submit = len(self.HO.pending)
 
-        # a set of jobs to track
-        self.pending = set(self.pending_work_dict.keys())
-        # total number of sampled point
-        self.n_jobs=len(self.pending)
-        self.res_list = []
+        # filling remaining slots with BO jobs
+        while self.n_jobs < self.max_n_jobs and n_submit < len(self.lbview):
+            self.n_jobs += 1
+            n_submit += 1
+            self._submit_BO_job()
+        # finally report the submitted jobs
+        print('\n'+time.strftime('%H:%M:%S')+\
+        ' Submited {} jobs. n_jobs={}, N_sim={}, N_BO={}\n'.format(\
+                        n_submit,self.n_jobs,self._N_sim(),self._N_BO()))
 
-
-    def optimize(self,max_n_jobs,wait_time=1e-1):
+    def optimize(self,wait_time=1e-1):
         print("Monitoring results")
 
         while self.pending:
@@ -122,7 +130,6 @@ class IPP_MinimintOptimizer(object):
             finished = self.pending.difference(self.ipp_client.outstanding)
             # update pending to exclude those that just finished
             self.pending = self.pending.difference(finished)
-
 
             # handle the results
             free_sim_slots = 0
@@ -148,51 +155,25 @@ class IPP_MinimintOptimizer(object):
                     # and the params in real units
                     job_id,params = self.HO.process_next_point(candidate)
                     # submit job
-                    ar = self.lbview.apply_async(self.run_job,params)
-                    #BOOKKEEPING
-                    # update the pending set
-                    self.pending.add(ar.msg_ids[0])
-                    # update pending_work_dict
-                    self.pending_work_dict[ar.msg_ids[0]] = \
-                        {'async_res':ar,\
-                         'type':self._SIMULATION,\
-                         'job_id':job_id}
+                    self._submit_sim_job(job_id,params)
                     print("Submited job_id {}. t_BO={:.3}".format(job_id,dur))
                 else:
                     raise RuntimeError("Wrong job type")
 
             # submit new BO jobs for every sim the finished
             n_submit = 0
-            if free_sim_slots>0:
-                while self.n_jobs < max_n_jobs and n_submit < free_sim_slots:
-                    self.n_jobs += 1
-                    n_submit += 1
-                    #submit BO with current known and pending results
-                    ar = self.lbview.apply_async(\
-                             self.select_point,\
-                             np.array(self.HO.complete),\
-                             np.array(self.HO.values),\
-                             np.array(self.HO.pending))
-                    #BOOKKEEPING
-                    # update the pending set
-                    self.pending.add(ar.msg_ids[0])
-                    # update work_dict
-                    self.pending_work_dict[ar.msg_ids[0]] = \
-                        {'async_res':ar,\
-                         'type':self._BO}
+            while self.n_jobs < self.max_n_jobs and n_submit < free_sim_slots:
+                self.n_jobs += 1
+                n_submit += 1
+                self._submit_BO_job()
 
             # If needed do some post processing after submiting the jobs
-            if n_submit>0:
-                N_BO=len([key for key,val in self.pending_work_dict.items() \
-                          if val['type']==self._BO])
-                N_sim=len([key for key,val in self.pending_work_dict.items() \
-                           if val['type']==self._SIMULATION])
-
+            if n_submit > 0:
                 print('\n'+time.strftime('%H:%M:%S')+\
                 ' Submited {} chooser jobs. n_jobs={}, N_sim={}, N_BO={}\n'.format(\
-                                n_submit,self.n_jobs,N_sim,N_BO))
+                                n_submit,self.n_jobs,self._N_sim(),self._N_BO()))
 
-            #saving to file
+            #saving results
             if len(self.res_list)>self.min_n_save:
                 t_init = time.time()
                 self.save_results(self.res_list)
@@ -200,6 +181,7 @@ class IPP_MinimintOptimizer(object):
                 print("\n"+time.strftime('%H:%M:%S')+\
                         " Saved {} results. t_save={:.4}\n".format(\
                                         len(self.res_list),t_sav))
+                # empty the results list
                 self.res_list =[]
 
         #saving final results to file
@@ -211,3 +193,49 @@ class IPP_MinimintOptimizer(object):
 
         if self.shutdown_ipp:
             self.ipp_client.shutdown()
+
+    ######################### HELPER FUNCTIONS #################################
+    def _unwrap_async_result(self, ar):
+        # we know these are done, so don't worry about blocking
+        result = ar.get()
+        #sometimes returns list with one tuple
+        if type(result)==list:
+            result = result[0]
+        return result
+
+    def _N_BO(self):
+        ''' returns the number of running BO jobs '''
+        return len([key for key,val in self.pending_work_dict.items() \
+                  if val['type']==self._BO])
+    def _N_sim(self):
+        ''' returns the number of running sim jobs '''
+        return len([key for key,val in self.pending_work_dict.items() \
+                   if val['type']==self._SIMULATION])
+
+    def _submit_sim_job(self,job_id,params):
+        ''' Submits sim job and updates pending DB '''
+        ar = self.lbview.apply_async(self.run_job,params)
+        #BOOKKEEPING
+        # update the pending set
+        self.pending.add(ar.msg_ids[0])
+        # update pending_work_dict
+        self.pending_work_dict[ar.msg_ids[0]] = \
+            {'async_res':ar,\
+             'type':self._SIMULATION,\
+             'job_id':job_id}
+
+    def _submit_BO_job(self):
+        ''' Submits BO job and updates pending DB '''
+        #submit BO with current known and pending results
+        ar = self.lbview.apply_async(\
+                 self.select_point,\
+                 np.array(self.HO.complete),\
+                 np.array(self.HO.values),\
+                 np.array(self.HO.pending))
+        #BOOKKEEPING
+        # update the pending set
+        self.pending.add(ar.msg_ids[0])
+        # update work_dict
+        self.pending_work_dict[ar.msg_ids[0]] = \
+            {'async_res':ar,\
+             'type':self._BO}

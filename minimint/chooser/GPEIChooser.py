@@ -118,7 +118,10 @@ class GPEIChooser:
             return self.amp2 * self.cov_func(self.ls, x1, x2)
 
     def next(self, grid, values, durations, candidates, pending, complete):
-
+        # The indexing here is really confusing and ineficient.
+        # It is not clear if other choosers actually need this.
+        # Leaving it like this to leave the class compatible with others in Spearmint
+        
         # Don't bother using fancy GP stuff at first.
         if complete.shape[0] < 2:
             return int(candidates[0])
@@ -133,13 +136,14 @@ class GPEIChooser:
         pend = grid[pending,:]
         vals = values[complete]
 
-
+        # perform some MC steps to equilibrate the GP hyperparameters
         if self.burn_in_mcmc_iters > 0:
             for t in range(self.burn_in_mcmc_iters):
                 self.sample_hypers(comp, vals)
 
+
         if self.mcmc_iters > 0:
-            # Sample from hyperparameters.
+            # Sample from the posterior distribution of the GP hyperparameters.
 
             overall_ei = np.zeros((cand.shape[0], self.mcmc_iters))
 
@@ -151,8 +155,10 @@ class GPEIChooser:
 
                 overall_ei[:,mcmc_iter] = self.compute_ei(comp, pend, cand, vals)
 
+            # find point of max EI from candidates
             best_cand = np.argmax(np.mean(overall_ei, axis=1))
 
+            #return index of best candidate
             return int(candidates[best_cand])
 
         else:
