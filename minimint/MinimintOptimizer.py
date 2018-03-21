@@ -3,7 +3,7 @@ import numpy as np
 
 class MinimintOptimizer(object):
     def __init__(self,variables,chooser,init_grid_size = 8,grid_size = 200):
-        self.gmap = GridMap([v for k,v in variables.items()])
+        self.gmap = GridMap(variables)
 
         # get initial points for initial submit
         self.pending = list(self.gmap.hypercube_grid(init_grid_size,1))
